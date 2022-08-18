@@ -1,15 +1,20 @@
-from __future__ import unicode_literals, print_function, division
 from io import open
 import unicodedata
 import re
 import random
+import math
+import os
+
 import torch
 from torch import optim
 import torch.nn as nn
 import torch.nn.functional as F
-import jellyfish
 import time
-import math
+
+
+from PIL import Image
+from min_dalle import MinDalle
+
 
 #training time - ~35min m1 air
 
@@ -126,26 +131,6 @@ class EncoderRNN(nn.Module):
     def initHidden(self):
         return torch.zeros(1, 1, self.hidden_size, device=device)
 
-class DecoderRNN(nn.Module):
-    def __init__(self, hidden_size, output_size):
-        super(DecoderRNN, self).__init__()
-        self.hidden_size = hidden_size
-
-        self.embedding = nn.Embedding(output_size, hidden_size)
-        self.gru = nn.GRU(hidden_size, hidden_size)
-        self.out = nn.Linear(hidden_size, output_size)
-        self.softmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, input, hidden):
-        output = self.embedding(input).view(1, 1, -1)
-        output = F.relu(output)
-        output, hidden = self.gru(output, hidden)
-        output = self.softmax(self.out(output[0]))
-        return output, hidden
-
-    def initHidden(self):
-        return torch.zeros(1, 1, self.hidden_size, device=device)
-
 class AttnDecoderRNN(nn.Module):
     def __init__(self, hidden_size, output_size, dropout_p=0.1, max_length=MAX_LENGTH):
         super(AttnDecoderRNN, self).__init__()
@@ -193,6 +178,7 @@ def tensorsFromPair(pair):
     target_tensor = tensorFromSentence(output_lang, pair[1])
     return (input_tensor, target_tensor)
 
+#min 0 max 1. Increase to improve grammar, decrease to improve individual word transation
 teacher_forcing_ratio = 0.5
 
 def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length=MAX_LENGTH):
@@ -316,6 +302,54 @@ def evaluate(encoder, decoder, sentence, max_length=MAX_LENGTH):
 
         return decoded_words, decoder_attentions[:di + 1]
 
+def jaro(s, t):
+    '''Jaro distance between two strings.'''
+    #SOURCE + EXPLANATION https://rosettacode.org/wiki/Jaro_similarity#Python 
+    s_len = len(s)
+    t_len = len(t)
+ 
+    if s_len == 0 and t_len == 0:
+        return 1
+ 
+    match_distance = (max(s_len, t_len) // 2) - 1
+ 
+    s_matches = [False] * s_len
+    t_matches = [False] * t_len
+ 
+    matches = 0
+    transpositions = 0
+ 
+    for i in range(s_len):
+        start = max(0, i - match_distance)
+        end = min(i + match_distance + 1, t_len)
+ 
+        for j in range(start, end):
+            if t_matches[j]:
+                continue
+            if s[i] != t[j]:
+                continue
+            s_matches[i] = True
+            t_matches[j] = True
+            matches += 1
+            break
+ 
+    if matches == 0:
+        return 0
+ 
+    k = 0
+    for i in range(s_len):
+        if not s_matches[i]:
+            continue
+        while not t_matches[k]:
+            k += 1
+        if s[i] != t[k]:
+            transpositions += 1
+        k += 1
+ 
+    return ((matches / s_len) +
+            (matches / t_len) +
+            ((matches - transpositions / 2) / matches)) / 3
+
 def runTests(encoder, decoder, n=12000):
     print("Testing...")
     accuracy = 0
@@ -326,9 +360,9 @@ def runTests(encoder, decoder, n=12000):
         output_words = evaluate(encoder, decoder, pair[0])
         output_words[0].pop() 
         output = " ".join(output_words[0])
-        accuracy += jellyfish.jaro_distance(pair[1], output)
+        accuracy += jaro(pair[1], output)
         print('Machine translation: ', output)
-        print("Accuracy: ", jellyfish.jaro_distance(pair[1], output))
+        print("Accuracy: ", jaro(pair[1], output))
         print('')
 
     print("Total accuracy of ", n, " strings: ", accuracy/n * 100, "%")
@@ -336,27 +370,57 @@ def runTests(encoder, decoder, n=12000):
 hidden_size = 256
 
 #uncomment to train and save model
-#encoder1 = EncoderRNN(input_lang.n_words, hidden_size).to(device)
+#encoder = EncoderRNN(input_lang.n_words, hidden_size).to(device)
 #attn_decoder1 = AttnDecoderRNN(hidden_size, output_lang.n_words, dropout_p=0.1).to(device)
-#trainIters(encoder1, attn_decoder1, 100000, print_every=2000)
-#torch.save(encoder1.state_dict(), "en-fr_encoder")
+#trainIters(encoder, attn_decoder1, 100000, print_every=2000)
+#torch.save(encoder.state_dict(), "en-fr_encoder")
 #torch.save(attn_decoder1.state_dict(), "en-fr_decoder")
 
-encoder1 = EncoderRNN(input_lang.n_words, 256).to(device)
-encoder1.load_state_dict(torch.load('en-fr_encoder'))
+encoder = EncoderRNN(input_lang.n_words, 256).to(device)
+encoder.load_state_dict(torch.load('en-fr_encoder'))
 attn_decoder1 = AttnDecoderRNN(256, output_lang.n_words, dropout_p=0.1).to(device)
 attn_decoder1.load_state_dict(torch.load('en-fr_decoder'))
 
 #uncomment to test against dataset
-#runTests(encoder1, attn_decoder1)
+runTests(encoder, attn_decoder1)
 
-for step in range(10):
-    print("Your message in french:")
-    msg = input()
-    output_words = evaluate(encoder1, attn_decoder1, msg)
-    output_words[0].pop() 
-    output = " ".join(output_words[0])
-    print(output)
+print("Your message in french:")
+msg = input()
+output_words = evaluate(encoder, attn_decoder1, msg)
+output_words[0].pop() 
+output = " ".join(output_words[0])
+print(output) 
+
+def save_image(image: Image.Image, path: str):
+    if os.path.isdir(path):
+        path = os.path.join(path, 'generated.png')
+    elif not path.endswith('.png'):
+        path += '.png'
+    print("saving image to", path)
+    image.save(path)
+    return image
+
+model = MinDalle(
+    models_root='./pretrained',
+    dtype=torch.float32,
+    device='cuda',
+    is_mega=True, 
+    is_reusable=True
+)
+
+image = model.generate_image(
+    text=output,
+    seed=-1,
+    grid_size=3,
+    is_seamless=False,
+    temperature=1,
+    top_k=256,
+    supercondition_factor=16,
+    is_verbose=False
+)
+
+save_image(image, "generated.png")
+
 
    
 
