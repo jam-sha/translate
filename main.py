@@ -11,10 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import time
 
-
 from PIL import Image
 from min_dalle import MinDalle
-
 
 #training time - ~35min m1 air
 
@@ -303,6 +301,7 @@ def evaluate(encoder, decoder, sentence, max_length=MAX_LENGTH):
         return decoded_words, decoder_attentions[:di + 1]
 
 def jaro(s, t):
+
     '''Jaro distance between two strings.'''
     #SOURCE + EXPLANATION https://rosettacode.org/wiki/Jaro_similarity#Python 
     s_len = len(s)
@@ -350,6 +349,8 @@ def jaro(s, t):
             (matches / t_len) +
             ((matches - transpositions / 2) / matches)) / 3
 
+from nltk.translate.bleu_score import sentence_bleu
+
 def runTests(encoder, decoder, n=12000):
     print("Testing...")
     accuracy = 0
@@ -360,9 +361,9 @@ def runTests(encoder, decoder, n=12000):
         output_words = evaluate(encoder, decoder, pair[0])
         output_words[0].pop() 
         output = " ".join(output_words[0])
-        accuracy += jaro(pair[1], output)
+        accuracy += jaro(pair[1], output) # alterative: bleu score  sentence_bleu([pair[1]], output)
         print('Machine translation: ', output)
-        print("Accuracy: ", jaro(pair[1], output))
+        print("Accuracy: ", jaro(pair[1], output)) # see above
         print('')
 
     print("Total accuracy of ", n, " strings: ", accuracy/n * 100, "%")
